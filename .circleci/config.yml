@@ -27,6 +27,40 @@ jobs:
           paths:
             - ../.m2
           key: v1-{{ checksum "pom.xml" }}
+  build-release:
+    docker:
+      - image: cimg/openjdk:17.0.10
+    resource_class: medium
+    steps:
+      - checkout
+      - restore_cache:
+          name: restore maven cache
+          keys: 
+            - v1-{{ checksum "pom.xml" }}
+            - v1-
+      - run: 
+          name: Upgrade app version
+          command: mvn versions:set -DnewVersion=1.0.0
+      - run:
+          name: Build release artifacts
+          command: mvn clean package -Prelease
+      - run:
+          name: Deploy Artifacts
+          command: |
+            # Update `server` settings in settings.xml file
+            # e.g. for Nexus, insert the following:
+            # <server>
+            #      <id>nexus-repo</id>
+            #      <username>${env.NEXUS_USERNAME}</username>
+            #      <password>${env.NEXUS_PASSWORD}</password>
+            # </server>
+            # Then execute the deploy command, e.g.:
+            # mvn deploy -DaltDeploymentRepository=nexus-repo::default::https://nexus.example.com/repository/maven-releases/
+            echo "deploying to Nexus"
+      - save_cache:
+          paths:
+            - ../.m2
+          key: v1-{{ checksum "pom.xml" }}
 
 workflows:
   build-and-test:
