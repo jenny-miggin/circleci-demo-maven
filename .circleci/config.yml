@@ -69,3 +69,6 @@ workflows:
       - maven/test:
           requires:
             - build
+      - build-release:
+          requires:
+            - maven/test
