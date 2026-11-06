@@ -4,7 +4,7 @@ public final class Gen000 {
   private Gen000() {}
   public static long compute0(long x) {
     long acc = x;
-    for (int k = 0; k < 3; k++) { acc = (acc * 31 + k) ^ (acc >>> 7); }
+    for (int k = 0; k < 4; k++) { acc = (acc * 31 + k) ^ (acc >>> 7); }
     return acc + java.util.List.of(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L).stream().mapToLong(Long::longValue).sum();
   }
   public static long compute1(long x) {
