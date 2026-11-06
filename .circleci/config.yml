@@ -5,6 +5,7 @@ version: 2.1
 #   save-restore-cache  - extension's local cache dir persisted with save_cache/restore_cache
 #   with-tool-cache     - extension's remote cache pointed at the with_tool_cache (tool: gradle) server
 # Dependencies (~/.m2/repository) are cached identically in all three so only the build cache differs.
+# "large" adds a deterministic 20 MB incompressible resource to each module (~320 MB of build cache).
 
 executors:
   jdk:
@@ -14,6 +15,27 @@ executors:
     working_directory: ~/project
 
 commands:
+  generate-blobs:
+    parameters:
+      blob_mb:
+        type: integer
+    steps:
+      - when:
+          condition: << parameters.blob_mb >>
+          steps:
+            - run:
+                name: Generate << parameters.blob_mb >> MB incompressible resource per module
+                working_directory: ~/project/bench
+                command: |
+                  for d in mod*/; do
+                    m=${d%/}
+                    mkdir -p "$m/src/main/resources"
+                    head -c << parameters.blob_mb >>M /dev/zero \
+                      | openssl enc -aes-128-ctr -nosalt -K 000102030405060708090a0b0c0d0e0f -iv "$(printf '%032x' "$((10#${m#mod}))")" \
+                      > "$m/src/main/resources/blob.bin"
+                  done
+                  md5sum mod00/src/main/resources/blob.bin
+
   https-checkout:
     steps:
       - run:
@@ -55,34 +77,16 @@ commands:
             du -sh "$HOME/build-cache" 2>/dev/null || true
 
 jobs:
-  probe:
-    executor: jdk
-    steps:
-      - https-checkout
-      - with_tool_cache:
-          tool: gradle
-          steps:
-            - run:
-                name: Probe cache server paths
-                command: |
-                  cat ~/.gradle/init.d/circleci.gradle.kts
-                  BASE=$(jq -r .url /tmp/circleci-cache-subcommand.json)/v1/cache
-                  head -c 4096 /dev/urandom > /tmp/blob
-                  for p in "0123456789abcdef0123456789abcdef" "v1.1/com.example.bench/probe/abc123/buildinfo.xml" "v1.1/com.example.bench/probe/abc123/probe.jar"; do
-                    echo "--- $BASE/$p"
-                    curl -s -o /dev/null -w 'PUT %{http_code}\n' -X PUT --data-binary @/tmp/blob "$BASE/$p"
-                    curl -s -o /tmp/got -w 'GET %{http_code}\n' "$BASE/$p"
-                    cmp -s /tmp/blob /tmp/got && echo "roundtrip OK" || echo "roundtrip MISMATCH"
-                  done
-                  curl -s -o /dev/null -w 'GET missing %{http_code}\n' "$BASE/v1.1/does/not/exist.xml"
-                  BIN=$(ls /tmp/task-agent-subcommands/task-agent-subcommands/cache/*/linux/*/cache | head -1)
-                  "$BIN" --help 2>&1 | head -30 || true
-                  "$BIN" server start --help 2>&1 | head -30 || true
-
   no-build-cache:
     executor: jdk
+    parameters:
+      blob_mb:
+        type: integer
+        default: 0
     steps:
       - https-checkout
+      - generate-blobs:
+          blob_mb: << parameters.blob_mb >>
       - restore-deps
       - build:
           extra: -Dmaven.build.cache.enabled=false
@@ -90,27 +94,42 @@ jobs:
 
   save-restore-cache:
     executor: jdk
+    parameters:
+      blob_mb:
+        type: integer
+        default: 0
+      cache_prefix:
+        type: string
+        default: mvn-build-cache-v1
     steps:
       - https-checkout
+      - generate-blobs:
+          blob_mb: << parameters.blob_mb >>
       - restore-deps
       - restore_cache:
           name: Restore build cache
           keys:
-            - mvn-build-cache-v1-{{ .Branch }}-{{ .Revision }}
-            - mvn-build-cache-v1-{{ .Branch }}-
-            - mvn-build-cache-v1-
+            - << parameters.cache_prefix >>-{{ .Branch }}-{{ .Revision }}
+            - << parameters.cache_prefix >>-{{ .Branch }}-
+            - << parameters.cache_prefix >>-
       - build
       - save_cache:
           name: Save build cache
-          key: mvn-build-cache-v1-{{ .Branch }}-{{ .Revision }}
+          key: << parameters.cache_prefix >>-{{ .Branch }}-{{ .Revision }}
           paths:
             - ~/build-cache
       - save-deps
 
   with-tool-cache:
     executor: jdk
+    parameters:
+      blob_mb:
+        type: integer
+        default: 0
     steps:
       - https-checkout
+      - generate-blobs:
+          blob_mb: << parameters.blob_mb >>
       - restore-deps
       - with_tool_cache:
           tool: gradle
@@ -129,7 +148,19 @@ jobs:
 workflows:
   bench:
     jobs:
-      - probe
-      - no-build-cache
-      - save-restore-cache
-      - with-tool-cache
+      - no-build-cache:
+          name: no-build-cache-small
+      - save-restore-cache:
+          name: save-restore-cache-small
+      - with-tool-cache:
+          name: with-tool-cache-small
+      - no-build-cache:
+          name: no-build-cache-large
+          blob_mb: 20
+      - save-restore-cache:
+          name: save-restore-cache-large
+          blob_mb: 20
+          cache_prefix: mvn-build-cache-v1-blob20
+      - with-tool-cache:
+          name: with-tool-cache-large
+          blob_mb: 20
