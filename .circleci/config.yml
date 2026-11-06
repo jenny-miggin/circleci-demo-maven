@@ -2,7 +2,8 @@ version: 2.1
 
 # Maven Build Cache Extension benchmark, two workflows:
 #   save-restore                  - extension's local cache dir persisted with save_cache/restore_cache
-#   save-restore-plus-tool-cache  - the same, plus the build wrapped in with_tool_cache (tool: gradle)
+#   save-restore-plus-tool-cache  - the build wrapped in with_tool_cache (tool: gradle); the build cache
+#                                   is saved but not restored, so any cache hit must come from the tool cache
 # Dependencies (~/.m2/repository) are cached identically in both.
 # "large" adds a deterministic 20 MB incompressible resource to each module (~320 MB of build cache).
 
@@ -85,15 +86,15 @@ jobs:
       - generate-blobs:
           blob_mb: << parameters.blob_mb >>
       - restore-deps
-      - restore_cache:
-          name: Restore build cache
-          keys:
-            - << parameters.cache_prefix >>-{{ .Branch }}-{{ .Revision }}
-            - << parameters.cache_prefix >>-{{ .Branch }}-
-            - << parameters.cache_prefix >>-
       - unless:
           condition: << parameters.tool_cache >>
           steps:
+            - restore_cache:
+                name: Restore build cache
+                keys:
+                  - << parameters.cache_prefix >>-{{ .Branch }}-{{ .Revision }}
+                  - << parameters.cache_prefix >>-{{ .Branch }}-
+                  - << parameters.cache_prefix >>-
             - build
       - when:
           condition: << parameters.tool_cache >>
