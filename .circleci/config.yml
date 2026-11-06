@@ -1,37 +1,55 @@
 version: 2.1
 
-orbs:
-  maven: circleci/maven@1.4.1
-
-parameters:
-  maven_version: 
-    default: "3.9.2"
-    type: string
-
 jobs:
-  build:
+  probe:
     docker:
-      - image: cimg/openjdk:17.0.10
+      - image: cimg/openjdk:21.0
     resource_class: medium
     steps:
       - checkout
-      - restore_cache:
-          name: restore maven cache
-          keys: 
-            - v1-{{ checksum "pom.xml" }}
-            - v1-
-      - run: 
-          name: package the app
-          command: mvn compile
-      - save_cache:
-          paths:
-            - ../.m2
-          key: v1-{{ checksum "pom.xml" }}
+      - run:
+          name: Baseline (outside with_tool_cache)
+          command: |
+            env | sort > /tmp/env-before.txt
+            ls -la ~/.gradle 2>/dev/null || echo "no ~/.gradle"
+            mvn -v
+      - with_tool_cache:
+          tool: gradle
+          steps:
+            - run:
+                name: Inspect tool cache setup
+                command: |
+                  echo "=== env added by with_tool_cache ==="
+                  env | sort > /tmp/env-inside.txt
+                  diff /tmp/env-before.txt /tmp/env-inside.txt || true
+                  echo "=== ~/.gradle ==="
+                  find ~/.gradle -maxdepth 3 -type f 2>/dev/null | head -50
+                  for f in ~/.gradle/init.d/* ~/.gradle/init.gradle* ~/.gradle/gradle.properties; do
+                    [ -f "$f" ] && { echo "--- $f"; cat "$f"; }
+                  done
+                  echo "=== listening sockets ==="
+                  (ss -ltnpx 2>/dev/null || netstat -ltnp 2>/dev/null) | head -30
+                  echo "=== processes ==="
+                  ps -eo pid,args | grep -v '\[' | head -40
+            - run:
+                name: Probe server with arbitrary paths
+                command: |
+                  set -x
+                  URL=$(grep -rhoE 'https?://[^"'"'"' )]+' ~/.gradle 2>/dev/null | head -1)
+                  echo "Discovered URL: ${URL:-none}"
+                  [ -z "$URL" ] && exit 0
+                  BASE=${URL%/}
+                  head -c 4096 /dev/urandom > /tmp/blob
+                  for p in "deadbeef" "v1.1/com.example/demo/abc123/buildinfo.xml" "foo/bar/baz.jar"; do
+                    echo "--- PUT/GET $BASE/$p"
+                    curl -s -o /dev/null -w 'PUT %{http_code}\n' -X PUT --data-binary @/tmp/blob "$BASE/$p"
+                    curl -s -o /tmp/got -w 'GET %{http_code}\n' "$BASE/$p"
+                    cmp /tmp/blob /tmp/got && echo "roundtrip OK" || echo "roundtrip MISMATCH"
+                    curl -s -o /dev/null -w 'HEAD %{http_code}\n' -I "$BASE/$p"
+                  done
+                  curl -s -o /dev/null -w 'GET missing %{http_code}\n' "$BASE/does/not/exist"
 
 workflows:
-  build-and-test:
+  probe:
     jobs:
-      - build
-      - maven/test:
-          requires:
-            - build
+      - probe
