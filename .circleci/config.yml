@@ -36,13 +36,6 @@ commands:
                   done
                   md5sum mod00/src/main/resources/blob.bin
 
-  https-checkout:
-    steps:
-      - run:
-          name: Checkout over HTTPS
-          command: |
-            git clone --depth 1 --branch "$CIRCLE_BRANCH" "https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME.git" .
-            git log --oneline -1
   restore-deps:
     steps:
       - restore_cache:
@@ -84,7 +77,7 @@ jobs:
         type: integer
         default: 0
     steps:
-      - https-checkout
+      - checkout
       - generate-blobs:
           blob_mb: << parameters.blob_mb >>
       - restore-deps
@@ -102,7 +95,7 @@ jobs:
         type: string
         default: mvn-build-cache-v1
     steps:
-      - https-checkout
+      - checkout
       - generate-blobs:
           blob_mb: << parameters.blob_mb >>
       - restore-deps
@@ -127,7 +120,7 @@ jobs:
         type: integer
         default: 0
     steps:
-      - https-checkout
+      - checkout
       - generate-blobs:
           blob_mb: << parameters.blob_mb >>
       - restore-deps
