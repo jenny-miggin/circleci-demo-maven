@@ -1,12 +1,21 @@
 version: 2.1
 
+commands:
+  https-checkout:
+    steps:
+      - run:
+          name: Checkout over HTTPS
+          command: |
+            git clone --depth 1 --branch "$CIRCLE_BRANCH" "https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME.git" .
+            git log --oneline -1
+
 jobs:
   probe:
     docker:
       - image: cimg/openjdk:21.0
     resource_class: medium
     steps:
-      - checkout
+      - https-checkout
       - run:
           name: Baseline (outside with_tool_cache)
           command: |
@@ -31,6 +40,14 @@ jobs:
                   (ss -ltnpx 2>/dev/null || netstat -ltnp 2>/dev/null) | head -30
                   echo "=== processes ==="
                   ps -eo pid,args | grep -v '\[' | head -40
+                  echo "=== cache subcommand config ==="
+                  ls -la /tmp/circleci-cache* 2>/dev/null
+                  cat /tmp/circleci-cache-subcommand.json 2>/dev/null | sed -E 's/("(token|secret|key|password)[^"]*": *")[^"]+/\1REDACTED/Ig'
+                  echo
+                  echo "=== agent cache help ==="
+                  AGENT=$(command -v circleci-agent || ls /bin/circleci-agent /usr/local/bin/circleci-agent 2>/dev/null | head -1)
+                  echo "agent: $AGENT"
+                  [ -n "$AGENT" ] && { "$AGENT" cache --help 2>&1 | head -60; "$AGENT" cache server --help 2>&1 | head -60; }
             - run:
                 name: Probe server with arbitrary paths
                 command: |
