@@ -1,10 +1,9 @@
 version: 2.1
 
-# Maven Build Cache Extension benchmark: the same build, three ways.
-#   no-build-cache      - plain mvn verify
-#   save-restore-cache  - extension's local cache dir persisted with save_cache/restore_cache
-#   with-tool-cache     - extension's remote cache pointed at the with_tool_cache (tool: gradle) server
-# Dependencies (~/.m2/repository) are cached identically in all three so only the build cache differs.
+# Maven Build Cache Extension benchmark, two workflows:
+#   save-restore                  - extension's local cache dir persisted with save_cache/restore_cache
+#   save-restore-plus-tool-cache  - the same, plus the build wrapped in with_tool_cache (tool: gradle)
+# Dependencies (~/.m2/repository) are cached identically in both.
 # "large" adds a deterministic 20 MB incompressible resource to each module (~320 MB of build cache).
 
 executors:
@@ -70,21 +69,6 @@ commands:
             du -sh "$HOME/build-cache" 2>/dev/null || true
 
 jobs:
-  no-build-cache:
-    executor: jdk
-    parameters:
-      blob_mb:
-        type: integer
-        default: 0
-    steps:
-      - checkout
-      - generate-blobs:
-          blob_mb: << parameters.blob_mb >>
-      - restore-deps
-      - build:
-          extra: -Dmaven.build.cache.enabled=false
-      - save-deps
-
   save-restore-cache:
     executor: jdk
     parameters:
@@ -93,7 +77,9 @@ jobs:
         default: 0
       cache_prefix:
         type: string
-        default: mvn-build-cache-v1
+      tool_cache:
+        type: boolean
+        default: false
     steps:
       - checkout
       - generate-blobs:
@@ -105,7 +91,17 @@ jobs:
             - << parameters.cache_prefix >>-{{ .Branch }}-{{ .Revision }}
             - << parameters.cache_prefix >>-{{ .Branch }}-
             - << parameters.cache_prefix >>-
-      - build
+      - unless:
+          condition: << parameters.tool_cache >>
+          steps:
+            - build
+      - when:
+          condition: << parameters.tool_cache >>
+          steps:
+            - with_tool_cache:
+                tool: gradle
+                steps:
+                  - build
       - save_cache:
           name: Save build cache
           key: << parameters.cache_prefix >>-{{ .Branch }}-{{ .Revision }}
@@ -113,47 +109,24 @@ jobs:
             - ~/build-cache
       - save-deps
 
-  with-tool-cache:
-    executor: jdk
-    parameters:
-      blob_mb:
-        type: integer
-        default: 0
-    steps:
-      - checkout
-      - generate-blobs:
-          blob_mb: << parameters.blob_mb >>
-      - restore-deps
-      - with_tool_cache:
-          tool: gradle
-          steps:
-            - run:
-                name: Point Maven at the tool cache server
-                command: |
-                  echo "export MVN_REMOTE_URL=$(jq -r .url /tmp/circleci-cache-subcommand.json)/v1/cache" >> "$BASH_ENV"
-            - build:
-                extra: >-
-                  -Dmaven.build.cache.remote.enabled=true
-                  -Dmaven.build.cache.remote.save.enabled=true
-                  -Dmaven.build.cache.remote.url="$MVN_REMOTE_URL"
-      - save-deps
-
 workflows:
-  bench:
+  save-restore:
     jobs:
-      - no-build-cache:
-          name: no-build-cache-small
       - save-restore-cache:
-          name: save-restore-cache-small
-      - with-tool-cache:
-          name: with-tool-cache-small
-      - no-build-cache:
-          name: no-build-cache-large
-          blob_mb: 20
+          name: save-restore-small
+          cache_prefix: mvn-build-cache-v1
       - save-restore-cache:
-          name: save-restore-cache-large
+          name: save-restore-large
           blob_mb: 20
           cache_prefix: mvn-build-cache-v1-blob20
-      - with-tool-cache:
-          name: with-tool-cache-large
+  save-restore-plus-tool-cache:
+    jobs:
+      - save-restore-cache:
+          name: save-restore-plus-tool-cache-small
+          cache_prefix: mvn-build-cache-v2-tc
+          tool_cache: true
+      - save-restore-cache:
+          name: save-restore-plus-tool-cache-large
           blob_mb: 20
+          cache_prefix: mvn-build-cache-v2-tc-blob20
+          tool_cache: true
