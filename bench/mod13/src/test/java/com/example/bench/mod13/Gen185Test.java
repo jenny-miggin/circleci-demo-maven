@@ -1,0 +1,12 @@
+package com.example.bench.mod13;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import org.junit.jupiter.api.Test;
+
+class Gen185Test {
+  @Test
+  void deterministic() throws Exception {
+    assertEquals(Gen185.compute5(42), Gen185.compute5(42));
+    Thread.sleep(20);
+  }
+}

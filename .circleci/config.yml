@@ -1,5 +1,18 @@
 version: 2.1
 
+# Maven Build Cache Extension benchmark: the same build, three ways.
+#   no-build-cache      - plain mvn verify
+#   save-restore-cache  - extension's local cache dir persisted with save_cache/restore_cache
+#   with-tool-cache     - extension's remote cache pointed at the with_tool_cache (tool: gradle) server
+# Dependencies (~/.m2/repository) are cached identically in all three so only the build cache differs.
+
+executors:
+  jdk:
+    docker:
+      - image: cimg/openjdk:21.0
+    resource_class: medium
+    working_directory: ~/project
+
 commands:
   https-checkout:
     steps:
@@ -8,65 +21,115 @@ commands:
           command: |
             git clone --depth 1 --branch "$CIRCLE_BRANCH" "https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME.git" .
             git log --oneline -1
+  restore-deps:
+    steps:
+      - restore_cache:
+          name: Restore Maven dependencies
+          keys:
+            - m2-deps-v1-{{ checksum "bench/pom.xml" }}
+  save-deps:
+    steps:
+      - save_cache:
+          name: Save Maven dependencies
+          key: m2-deps-v1-{{ checksum "bench/pom.xml" }}
+          paths:
+            - ~/.m2/repository
+  build:
+    parameters:
+      extra:
+        type: string
+        default: ""
+    steps:
+      - run:
+          name: mvn verify
+          working_directory: ~/project/bench
+          command: |
+            mvn -B -ntp verify -Dmaven.build.cache.location="$HOME/build-cache" << parameters.extra >> 2>&1 | tee /tmp/mvn.log
+            test "${PIPESTATUS[0]}" -eq 0
+      - run:
+          name: Cache summary
+          when: always
+          command: |
+            echo "modules restored from cache: $(grep -c 'Found cached build' /tmp/mvn.log || true) of 16"
+            grep -E 'Total time|BUILD' /tmp/mvn.log
+            du -sh "$HOME/build-cache" 2>/dev/null || true
 
 jobs:
   probe:
-    docker:
-      - image: cimg/openjdk:21.0
-    resource_class: medium
+    executor: jdk
     steps:
       - https-checkout
-      - run:
-          name: Baseline (outside with_tool_cache)
-          command: |
-            env | sort > /tmp/env-before.txt
-            ls -la ~/.gradle 2>/dev/null || echo "no ~/.gradle"
-            mvn -v
       - with_tool_cache:
           tool: gradle
           steps:
             - run:
-                name: Inspect tool cache setup
+                name: Probe cache server paths
                 command: |
-                  echo "=== env added by with_tool_cache ==="
-                  env | sort > /tmp/env-inside.txt
-                  diff /tmp/env-before.txt /tmp/env-inside.txt || true
-                  echo "=== ~/.gradle ==="
-                  find ~/.gradle -maxdepth 3 -type f 2>/dev/null | head -50
-                  for f in ~/.gradle/init.d/* ~/.gradle/init.gradle* ~/.gradle/gradle.properties; do
-                    [ -f "$f" ] && { echo "--- $f"; cat "$f"; }
-                  done
-                  echo "=== listening sockets ==="
-                  (ss -ltnpx 2>/dev/null || netstat -ltnp 2>/dev/null) | head -30
-                  echo "=== processes ==="
-                  ps -eo pid,args | grep -v '\[' | head -40
-                  echo "=== cache subcommand config ==="
-                  ls -la /tmp/circleci-cache* 2>/dev/null
-                  cat /tmp/circleci-cache-subcommand.json 2>/dev/null | sed -E 's/("(token|secret|key|password)[^"]*": *")[^"]+/\1REDACTED/Ig'
-                  echo
-                  echo "=== agent cache help ==="
-                  AGENT=$(command -v circleci-agent || ls /bin/circleci-agent /usr/local/bin/circleci-agent 2>/dev/null | head -1)
-                  echo "agent: $AGENT"
-                  [ -n "$AGENT" ] && { "$AGENT" cache --help 2>&1 | head -60; "$AGENT" cache server --help 2>&1 | head -60; }
-            - run:
-                name: Probe server with arbitrary paths
-                command: |
-                  set -x
-                  URL=$(grep -rhoE 'https?://[^"'"'"' )]+' ~/.gradle 2>/dev/null | head -1)
-                  echo "Discovered URL: ${URL:-none}"
-                  [ -z "$URL" ] && exit 0
-                  BASE=${URL%/}
+                  cat ~/.gradle/init.d/circleci.gradle.kts
+                  BASE=$(jq -r .url /tmp/circleci-cache-subcommand.json)/v1/cache
                   head -c 4096 /dev/urandom > /tmp/blob
-                  for p in "deadbeef" "v1.1/com.example/demo/abc123/buildinfo.xml" "foo/bar/baz.jar"; do
-                    echo "--- PUT/GET $BASE/$p"
+                  for p in "0123456789abcdef0123456789abcdef" "v1.1/com.example.bench/probe/abc123/buildinfo.xml" "v1.1/com.example.bench/probe/abc123/probe.jar"; do
+                    echo "--- $BASE/$p"
                     curl -s -o /dev/null -w 'PUT %{http_code}\n' -X PUT --data-binary @/tmp/blob "$BASE/$p"
                     curl -s -o /tmp/got -w 'GET %{http_code}\n' "$BASE/$p"
-                    cmp /tmp/blob /tmp/got && echo "roundtrip OK" || echo "roundtrip MISMATCH"
-                    curl -s -o /dev/null -w 'HEAD %{http_code}\n' -I "$BASE/$p"
+                    cmp -s /tmp/blob /tmp/got && echo "roundtrip OK" || echo "roundtrip MISMATCH"
                   done
-                  curl -s -o /dev/null -w 'GET missing %{http_code}\n' "$BASE/does/not/exist"
+                  curl -s -o /dev/null -w 'GET missing %{http_code}\n' "$BASE/v1.1/does/not/exist.xml"
+                  BIN=$(ls /tmp/task-agent-subcommands/task-agent-subcommands/cache/*/linux/*/cache | head -1)
+                  "$BIN" --help 2>&1 | head -30 || true
+                  "$BIN" server start --help 2>&1 | head -30 || true
+
+  no-build-cache:
+    executor: jdk
+    steps:
+      - https-checkout
+      - restore-deps
+      - build:
+          extra: -Dmaven.build.cache.enabled=false
+      - save-deps
+
+  save-restore-cache:
+    executor: jdk
+    steps:
+      - https-checkout
+      - restore-deps
+      - restore_cache:
+          name: Restore build cache
+          keys:
+            - mvn-build-cache-v1-{{ .Branch }}-{{ .Revision }}
+            - mvn-build-cache-v1-{{ .Branch }}-
+            - mvn-build-cache-v1-
+      - build
+      - save_cache:
+          name: Save build cache
+          key: mvn-build-cache-v1-{{ .Branch }}-{{ .Revision }}
+          paths:
+            - ~/build-cache
+      - save-deps
+
+  with-tool-cache:
+    executor: jdk
+    steps:
+      - https-checkout
+      - restore-deps
+      - with_tool_cache:
+          tool: gradle
+          steps:
+            - run:
+                name: Point Maven at the tool cache server
+                command: |
+                  echo "export MVN_REMOTE_URL=$(jq -r .url /tmp/circleci-cache-subcommand.json)/v1/cache" >> "$BASH_ENV"
+            - build:
+                extra: >-
+                  -Dmaven.build.cache.remote.enabled=true
+                  -Dmaven.build.cache.remote.save.enabled=true
+                  -Dmaven.build.cache.remote.url="$MVN_REMOTE_URL"
+      - save-deps
 
 workflows:
-  probe:
+  bench:
     jobs:
       - probe
+      - no-build-cache
+      - save-restore-cache
+      - with-tool-cache
